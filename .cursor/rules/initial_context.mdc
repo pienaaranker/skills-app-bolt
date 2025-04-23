@@ -1,0 +1,19 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Initial Project Context Checklist
+
+When starting a new chat or revisiting the project, follow these steps to ensure you have the necessary context:
+
+1.  **Understand Project Goals:** Read the Product Requirements Document (PRD) to grasp the overall problem, proposed solution, architecture, and key features.
+    *   [prd.md](mdc:prd.md)
+
+2.  **Check Implementation Status:** Review the implementation plan to see what has been completed and what tasks are next.
+    *   [implementation_plan.md](mdc:implementation_plan.md)
+
+3.  **Adhere to Visual Style:** Familiarize yourself with the visual design guidelines, including color palettes, typography, and component styling.
+    *   [style-guide.md](mdc:style-guide.md)
+
+Following these steps will help ensure our work aligns with the project's objectives, current progress, and visual identity.

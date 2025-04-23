@@ -1,0 +1,15 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Design and Technical Guidelines
+
+Follow these guidelines when generating designs and writing code:
+
+*   **Design Quality:** Aim for beautiful, unique designs suitable for production, not generic templates. Ensure webpages are fully featured.
+*   **Client Components:** Always add the `"use client"` directive at the top of any file using client-side hooks (`useState`, `useEffect`) when Next.js might treat it as a Server Component.
+*   **Avoid Hydration Errors:** Do not write code that triggers the "Warning: Extra attributes from the server" error (e.g., mismatched `class` or `style` attributes).
+*   **Core Libraries:** Utilize the existing stack: JSX with Tailwind CSS, `shadcn/ui`, React hooks, and `lucide-react` for icons. Avoid installing other UI/icon libraries unless specifically requested or essential.
+*   **Icons:** Use icons exclusively from `lucide-react`. Use them for logos where appropriate.
+*   **Stock Photos:** Use valid stock photo URLs from Pexels when needed. Embed them using `<img>` tags; do not download the images locally.
