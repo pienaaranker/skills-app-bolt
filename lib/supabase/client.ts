@@ -1,4 +1,4 @@
-import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs'
+import { createBrowserClient } from '@supabase/ssr'
 
 // Ensure environment variables are set
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -13,7 +13,4 @@ if (!supabaseAnonKey) {
 }
 
 // Create and export the Supabase browser client instance
-export const supabase = createPagesBrowserClient({
-  supabaseUrl,
-  supabaseKey: supabaseAnonKey,
-})
+export const supabase = createBrowserClient(supabaseUrl, supabaseAnonKey)

@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 // Use Server Auth Helpers for route handlers
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
-import { cookies } from 'next/headers';
+import { createServerClient } from '@supabase/ssr' // Removed CookieOptions as we won't use set/remove here
+// Removed cookies import as we use request.cookies
+import type { SupabaseClient } from '@supabase/supabase-js'; // Import base client type
 // import type { Database } from '@/lib/database.types'; // Assuming you have generated types
 type Database = any; // Use any as temporary fallback for Database types
 
@@ -45,11 +46,7 @@ const GeminiResponseSchema = z.object({
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 const generationConfig = {
-  // temperature: 0.7, // Adjust as needed
-  // topK: 1,
-  // topP: 1,
-  // maxOutputTokens: 2048,
-  // responseMimeType: "application/json", // Use this if available and reliable
+    responseMimeType: "application/json",
 };
 
 const safetySettings = [
@@ -62,7 +59,7 @@ const safetySettings = [
 // --- Database Saving Logic --- 
 // Extracted into a separate function for clarity
 async function saveGeneratedCurriculum(
-  supabase: ReturnType<typeof createRouteHandlerClient<Database>>, // Use the correct Supabase client type
+  supabase: SupabaseClient<Database>, // Use the base SupabaseClient type
   userId: string,
   skillName: string,
   experienceLevel: string,
@@ -168,11 +165,23 @@ export async function POST(req: NextRequest) {
      return NextResponse.json({ error: 'API key not configured' }, { status: 500 });
   }
 
-  // Create Supabase client specific to this route handler
-  const supabaseRouteHandler = createRouteHandlerClient<Database>({ cookies });
+  // Create Supabase client specific to this route handler using the simpler read-only pattern
+  const supabaseRouteHandler = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return req.cookies.get(name)?.value
+        },
+        // No set/remove needed here for this pattern, assume middleware handles refresh
+      },
+    }
+  )
 
   try {
      // --- 1. Authentication --- 
+     // getSession might still attempt internal cookie operations if refresh needed
      const { data: { session }, error: sessionError } = await supabaseRouteHandler.auth.getSession();
      if (sessionError || !session?.user) {
        console.error("Auth Error:", sessionError);
@@ -214,69 +223,52 @@ Return ONLY the raw JSON object (no markdown formatting like \`\`\`json) matchin
 
     console.log(`Generating curriculum for Skill: ${skillName}, User: ${userId}`);
 
-    const model = genAI.getGenerativeModel({ model: process.env.NEXT_PUBLIC_GEMINI_MODEL || "gemini-2.5-flash-preview-04-17" });
-    const result = await model.generateContent(prompt);
+    const model = genAI.getGenerativeModel({ model: process.env.NEXT_PUBLIC_GEMINI_MODEL || "gemini-1.5-flash-latest" });
+    
+    const result = await model.generateContent({ 
+        contents: [{ role: "user", parts: [{text: prompt}] }], 
+        generationConfig: generationConfig,
+        safetySettings: safetySettings,
+    });
     const response = result.response;
     const responseText = response.text();
 
-    console.log("Raw Gemini Response Text:\n ", responseText); // Log raw response for debugging
+    // Since we requested JSON, parse directly
+    const parsedGeminiJson = JSON.parse(responseText);
+    console.log("Parsed Gemini JSON Response:", parsedGeminiJson); 
 
     // --- 5. Parse & Validate Gemini Response --- 
-    let parsedGeminiJson: any;
-    try {
-      // Attempt to parse the text response as JSON
-      parsedGeminiJson = JSON.parse(responseText);
-    } catch (parseError: any) {
-      console.error('JSON Parsing Error:', parseError);
-      console.error('Raw Response Text that failed parsing:', responseText);
-       // Try to extract JSON from markdown code blocks if necessary (common issue)
-       // Reinstate /s flag to allow . to match newlines
-       const jsonMatch = responseText.match(/```json\n(\{.*?\})\n```/s); 
-       if (jsonMatch && jsonMatch[1]) {
-         console.log('Attempting to parse extracted JSON from markdown...');
-         try {
-           parsedGeminiJson = JSON.parse(jsonMatch[1]);
-         } catch (nestedParseError) {
-           console.error('Nested JSON Parsing Error:', nestedParseError);
-           throw new Error('Failed to parse JSON response from AI service, even after attempting extraction.');
-         }
-       } else {
-         throw new Error('Failed to parse JSON response from AI service. Response was not valid JSON.');
-       }
-    }
-
     // Validate the parsed JSON structure against our Zod schema
     const validatedResponse = GeminiResponseSchema.safeParse(parsedGeminiJson);
 
     if (!validatedResponse.success) {
-      console.error('Gemini curriculum response validation error:', validatedResponse.error.format());
-      console.error('Parsed JSON that failed validation:', parsedGeminiJson); // Log the object that failed validation
-      throw new Error('AI service response structure did not match expected format.');
+      console.error("Gemini Response Validation Error:", validatedResponse.error.format());
+      throw new Error('AI service response did not match expected structure.');
     }
-    const generatedCurriculum = validatedResponse.data.curriculum;
+    const curriculumData = validatedResponse.data.curriculum;
     // -----------------------------------------
 
     // --- 6. Save to Database --- 
     const newCurriculumId = await saveGeneratedCurriculum(
-      supabaseRouteHandler, // Pass the correct client
+      supabaseRouteHandler,
       userId,
       skillName,
       experienceLevel,
       quizResults,
-      generatedCurriculum
+      curriculumData
     );
-    // -------------------------
+    // ---------------------------
 
     // --- 7. Return Success Response --- 
-    return NextResponse.json({ curriculumId: newCurriculumId }, { status: 200 });
+    return NextResponse.json({ 
+        message: 'Curriculum generated successfully', 
+        curriculumId: newCurriculumId, 
+        curriculum: curriculumData // Optionally return the generated data
+    });
     // ------------------------------
 
   } catch (error: any) {
-    console.error("Error in POST /api/curriculum:", error);
-    // Update curriculum record status to 'failed' if applicable?
-    return NextResponse.json(
-      { error: 'Curriculum generation failed', message: error.message || 'Internal server error' },
-      { status: 500 }
-    );
+    console.error("API Route Error:", error);
+    return NextResponse.json({ error: error.message || 'An unexpected error occurred' }, { status: 500 });
   }
 } 
