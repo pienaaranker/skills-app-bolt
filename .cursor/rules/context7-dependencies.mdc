@@ -1,0 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Dependency Information Rule
+
+When working with external libraries or dependencies, always use the available tools to retrieve the latest documentation and information. This ensures you are using the libraries correctly and are aware of any recent changes or updates.
+
+1.  **Resolve Library ID:** Before fetching documentation, use the `mcp_context7_resolve-library-id` tool to get the correct Context7-compatible ID for the library.
+2.  **Get Library Docs:** Once you have the ID, use the `mcp_context7_get-library-docs` tool to fetch the relevant documentation. Specify topics if needed to narrow down the information.
+
+This process helps avoid using outdated information and ensures the code aligns with the latest library versions and best practices.
