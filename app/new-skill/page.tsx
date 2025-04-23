@@ -51,6 +51,8 @@ import {
 } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import type { CurriculumResponseType } from "@/app/api/curriculum/route";
+import { CurriculumDisplay } from "./components/CurriculumDisplay";
 
 // Types from CustomQuiz - consider moving these to a shared types file
 interface QuestionOption {
@@ -97,6 +99,9 @@ export default function NewSkillPage() {
   const [generatedQuestions, setGeneratedQuestions] = useState<QuizQuestion[] | null>(null);
   const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
   const [quizGenerationError, setQuizGenerationError] = useState<string | null>(null);
+
+  // ---> NEW: State to hold the generated curriculum data
+  const [generatedCurriculum, setGeneratedCurriculum] = useState<CurriculumResponseType | null>(null);
 
   useEffect(() => {
     const fetchSkills = async () => {
@@ -190,26 +195,26 @@ export default function NewSkillPage() {
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
     setIsSubmitting(true);
+    setGeneratedCurriculum(null); // Clear previous curriculum
     let statusToastId: string | undefined = undefined;
 
     try {
       // Initial Toast - Now directly for generation
-      const { id, dismiss } = toast({
+      const { id, dismiss: dismissToast } = toast({
         title: "Generating Curriculum...",
         description: `Requesting path for "${values.skillName}". This may take a moment...`,
         duration: Infinity, // Keep toast open until manually dismissed or success/error
       });
       statusToastId = id;
 
-      // --- Call the backend API to generate and save the curriculum --- 
+      // --- Call the backend API to generate the curriculum --- 
       const generationResponse = await fetch('/api/curriculum', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          skillName: values.skillName.trim(), // Ensure trimmed skill name is sent
+          skill: values.skillName.trim(), // API expects 'skill'
           experienceLevel: values.experienceLevel,
-          quizResults: values.experienceLevel === 'custom' ? quizResults : null,
-          // No curriculumId is sent from here anymore
+          quizResults: values.experienceLevel === 'custom' ? quizResults?.rationale : undefined,
         }),
       });
 
@@ -217,41 +222,32 @@ export default function NewSkillPage() {
 
       if (!generationResponse.ok) {
         console.error("Curriculum Generation API Error:", generationResult);
-        throw new Error(generationResult.error || 'Failed to generate curriculum.'); // Use error from API response
+        throw new Error(generationResult.message || 'Failed to generate curriculum.'); 
       }
 
-      // --- Handle Success --- 
-      // Expecting { curriculumId: number } from the API on success
-      const newCurriculumId = generationResult.curriculumId;
-      if (!newCurriculumId || typeof newCurriculumId !== 'number') {
-         console.error("Invalid curriculumId received from API:", generationResult);
-         throw new Error("API succeeded but did not return a valid curriculum ID.");
-      }
-      
-      console.log("Successfully generated and saved curriculum. ID:", newCurriculumId);
+      // Store the generated curriculum data in state
+      setGeneratedCurriculum(generationResult as CurriculumResponseType);
+      console.log("Successfully generated curriculum.", generationResult);
       
       // Update Toast: Dismiss old, show success
       if (statusToastId) dismiss(statusToastId);
       toast({ 
         title: "Curriculum Ready!",
-        description: `Your learning path for "${values.skillName.trim()}" is ready. Redirecting...`,
+        description: `Your learning path for "${values.skillName.trim()}" has been generated below.`,
         variant: "default",
         duration: 5000,
       });
       statusToastId = undefined; // Clear the ID
 
-      // Redirect to the curriculum display page
-      router.push(`/curriculum/${newCurriculumId}`);
-
     } catch (error: any) {
       console.error("Error during curriculum generation request:", error);
       // Update toast on error: Dismiss old, show error
       if (statusToastId) {
-        dismiss(statusToastId);
+        dismiss(statusToastId); // Use dismiss from useToast directly
       }
        toast({ 
          title: "Generation Failed",
-         description: error.message || "Could not generate curriculum. Please try again.", // More specific error message
+         description: error.message || "Could not generate curriculum. Please try again.", 
          variant: "destructive",
          duration: 8000,
        });
@@ -261,149 +257,175 @@ export default function NewSkillPage() {
     }
   }
 
+  // Function to reset the view back to the form
+  const handleResetForm = () => {
+    setGeneratedCurriculum(null);
+    form.reset(); // Reset form fields
+    setQuizResults(null); // Reset quiz results
+    setGeneratedQuestions(null); // Reset quiz questions
+  };
+
   return (
-    <div className="max-w-2xl py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight">Add a New Skill</h1>
-        <p className="text-muted-foreground">
-          Tell us what you want to learn and we'll create a personalized curriculum for you.
-        </p>
+    // Conditionally render based on generatedCurriculum state
+    generatedCurriculum ? (
+      <CurriculumDisplay 
+        curriculumData={generatedCurriculum} 
+        onReset={handleResetForm} 
+      />
+    ) : (
+      // Original Form structure
+      <div className="max-w-2xl w-full py-8"> {/* Added w-full */} 
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold tracking-tight">Add a New Skill</h1>
+          <p className="text-muted-foreground">
+            Tell us what you want to learn and we'll create a personalized curriculum for you.
+          </p>
+        </div>
+
+        <Card className="overflow-hidden">
+          <Form {...form}>
+            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-0">
+              <CardHeader>
+                <CardTitle>Skill Information</CardTitle>
+                <CardDescription>
+                  We'll use this to generate a learning path tailored to your experience level.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-8">
+                 {/* Skill Name Field */}
+                 <FormField
+                   control={form.control}
+                   name="skillName"
+                   render={({ field }) => (
+                     <FormItem>
+                       <FormLabel>What do you want to learn?</FormLabel>
+                       <FormControl>
+                         <Input
+                           placeholder="e.g., JavaScript, UX Design, Python, etc."
+                           {...field}
+                         />
+                       </FormControl>
+                       <FormDescription>
+                         Enter any skill, technology, or topic.
+                       </FormDescription>
+                        <FormMessage />
+                     </FormItem>
+                   )}
+                 />
+
+                 {/* Experience Level Field */}
+                 <FormField
+                   control={form.control}
+                   name="experienceLevel"
+                   render={({ field }) => (
+                     <FormItem className="space-y-3">
+                       <FormLabel>What's your experience level?</FormLabel>
+                       <FormControl>
+                         <RadioGroup
+                           onValueChange={(value) => {
+                             field.onChange(value);
+                             setGeneratedCurriculum(null); // Clear generated curriculum if level changes
+                           }}
+                           defaultValue={field.value}
+                           className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+                         >
+                           {/* Beginner Option */}
+                           <FormItem>
+                             <FormControl>
+                               <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
+                                 <RadioGroupItem value="beginner" id="beginner" />
+                                 <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="beginner">
+                                   <Feather className="h-5 w-5 text-muted-foreground" />
+                                   <div>
+                                     <div className="font-medium">Beginner</div>
+                                     <p className="text-sm font-normal text-muted-foreground">
+                                       New to this skill
+                                     </p>
+                                   </div>
+                                 </FormLabel>
+                               </div>
+                             </FormControl>
+                           </FormItem>
+                           {/* Intermediate Option */}
+                            <FormItem>
+                              <FormControl>
+                                <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
+                                  <RadioGroupItem value="intermediate" id="intermediate" />
+                                  <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="intermediate">
+                                    <SquareUser className="h-5 w-5 text-muted-foreground" />
+                                    <div>
+                                      <div className="font-medium">Intermediate</div>
+                                      <p className="text-sm font-normal text-muted-foreground">
+                                        Have some experience
+                                      </p>
+                                    </div>
+                                  </FormLabel>
+                                </div>
+                              </FormControl>
+                            </FormItem>
+                            {/* Advanced Option */}
+                             <FormItem>
+                               <FormControl>
+                                 <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
+                                   <RadioGroupItem value="advanced" id="advanced" />
+                                   <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="advanced">
+                                     <GraduationCap className="h-5 w-5 text-muted-foreground" />
+                                     <div>
+                                       <div className="font-medium">Advanced</div>
+                                       <p className="text-sm font-normal text-muted-foreground">
+                                         Proficient, seeking mastery
+                                       </p>
+                                     </div>
+                                   </FormLabel>
+                                 </div>
+                               </FormControl>
+                             </FormItem>
+                             {/* Custom Option */}
+                              <FormItem>
+                                <FormControl>
+                                  <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-amber-500 has-[:checked]:border-2">
+                                    <RadioGroupItem value="custom" id="custom" />
+                                    <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="custom">
+                                      <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
+                                      <div>
+                                        <div className="font-medium">Custom Assessment</div>
+                                        <p className="text-xs text-muted-foreground">Answer a few questions</p>
+                                      </div>
+                                    </FormLabel>
+                                  </div>
+                                </FormControl>
+                              </FormItem>
+                         </RadioGroup>
+                       </FormControl>
+                        <FormMessage />
+                     </FormItem>
+                   )}
+                 />
+
+                {shouldShowCustomQuiz && (
+                  <CustomQuiz
+                    skillName={watchSkillName || "your chosen skill"}
+                    onComplete={handleQuizComplete}
+                    questions={generatedQuestions}
+                    isLoading={isGeneratingQuiz}
+                    error={quizGenerationError}
+                  />
+                )}
+              </CardContent>
+              <CardFooter>
+                <Button
+                  type="submit"
+                  disabled={isSubmitting || (shouldShowCustomQuiz && !quizResults)}
+                  className="w-full"
+                >
+                  {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {isSubmitting ? "Generating..." : "Generate Curriculum"}
+                </Button>
+              </CardFooter>
+            </form>
+          </Form>
+        </Card>
       </div>
-
-      <Card className="overflow-hidden">
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-0">
-            <CardHeader>
-              <CardTitle>Skill Information</CardTitle>
-              <CardDescription>
-                We'll use this to generate a learning path tailored to your experience level.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-8">
-              <FormField
-                control={form.control}
-                name="skillName"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>What do you want to learn?</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="e.g., JavaScript, UX Design, Python, etc."
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      Enter any skill, technology, or topic.
-                    </FormDescription>
-                     <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name="experienceLevel"
-                render={({ field }) => (
-                  <FormItem className="space-y-3">
-                    <FormLabel>What's your experience level?</FormLabel>
-                    <FormControl>
-                      <RadioGroup
-                        onValueChange={field.onChange}
-                        defaultValue={field.value}
-                        className="grid grid-cols-1 gap-3 sm:grid-cols-2"
-                      >
-                        <FormItem>
-                          <FormControl>
-                            <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
-                              <RadioGroupItem value="beginner" id="beginner" />
-                              <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="beginner">
-                                <Feather className="h-5 w-5 text-muted-foreground" />
-                                <div>
-                                  <div className="font-medium">Beginner</div>
-                                  <p className="text-sm font-normal text-muted-foreground">
-                                    New to this skill
-                                  </p>
-                                </div>
-                              </FormLabel>
-                            </div>
-                          </FormControl>
-                        </FormItem>
-                        <FormItem>
-                          <FormControl>
-                            <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
-                              <RadioGroupItem value="intermediate" id="intermediate" />
-                              <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="intermediate">
-                                <SquareUser className="h-5 w-5 text-muted-foreground" />
-                                <div>
-                                  <div className="font-medium">Intermediate</div>
-                                  <p className="text-sm font-normal text-muted-foreground">
-                                    Have some experience
-                                  </p>
-                                </div>
-                              </FormLabel>
-                            </div>
-                          </FormControl>
-                        </FormItem>
-                        <FormItem>
-                          <FormControl>
-                            <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-primary">
-                              <RadioGroupItem value="advanced" id="advanced" />
-                              <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="advanced">
-                                <GraduationCap className="h-5 w-5 text-muted-foreground" />
-                                <div>
-                                  <div className="font-medium">Advanced</div>
-                                  <p className="text-sm font-normal text-muted-foreground">
-                                    Proficient, seeking mastery
-                                  </p>
-                                </div>
-                              </FormLabel>
-                            </div>
-                          </FormControl>
-                        </FormItem>
-                        <FormItem>
-                          <FormControl>
-                            <div className="flex items-center space-x-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50 has-[:checked]:border-amber-500 has-[:checked]:border-2">
-                              <RadioGroupItem value="custom" id="custom" />
-                              <FormLabel className="flex-1 cursor-pointer flex items-center gap-3" htmlFor="custom">
-                                <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
-                                <div>
-                                  <div className="font-medium">Custom Assessment</div>
-                                  <p className="text-xs text-muted-foreground">Answer a few questions</p>
-                                </div>
-                              </FormLabel>
-                            </div>
-                          </FormControl>
-                        </FormItem>
-                      </RadioGroup>
-                    </FormControl>
-                     <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              {shouldShowCustomQuiz && (
-                <CustomQuiz
-                  skillName={watchSkillName || "your chosen skill"}
-                  onComplete={handleQuizComplete}
-                  questions={generatedQuestions}
-                  isLoading={isGeneratingQuiz}
-                  error={quizGenerationError}
-                />
-              )}
-            </CardContent>
-            <CardFooter>
-              <Button
-                type="submit"
-                disabled={isSubmitting || (shouldShowCustomQuiz && !quizResults)}
-                className="w-full"
-              >
-                {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {isSubmitting ? "Generating..." : "Generate Curriculum"}
-              </Button>
-            </CardFooter>
-          </form>
-        </Form>
-      </Card>
-    </div>
+    )
   );
 }

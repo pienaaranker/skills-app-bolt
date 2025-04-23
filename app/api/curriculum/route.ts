@@ -8,47 +8,65 @@ import type { SupabaseClient } from '@supabase/supabase-js'; // Import base clie
 // import type { Database } from '@/lib/database.types'; // Assuming you have generated types
 type Database = any; // Use any as temporary fallback for Database types
 
-// Define the structure for quiz results (if provided)
-const QuizResultSchema = z.object({
-  level: z.enum(["beginner", "intermediate", "advanced"]),
-  rationale: z.string().optional(),
-  answers: z.record(z.string(), z.string()).optional(),
-}).nullable();
-
-// Define the structure for the request body
-const RequestBodySchema = z.object({
-  skillName: z.string().min(1),
-  experienceLevel: z.enum(["beginner", "intermediate", "advanced", "custom"]),
-  quizResults: QuizResultSchema, // Can be null if experienceLevel is not 'custom'
+// Define the expected structure for a single resource
+const ResourceSchema = z.object({
+  title: z.string().describe("Brief title of the learning resource"),
+  url: z.string().url({ message: "Invalid URL format" }).describe("Direct URL to the free learning resource"),
 });
 
-// Define the structure for curriculum response (matching Gemini needs)
+// Define the expected structure for a single step within a module
 const StepSchema = z.object({
-  title: z.string(),
-  resource_url: z.string().url().or(z.string()), // Allow non-URL initially, maybe refine later or add validation step
+  title: z.string().describe("Concise title for this learning step"),
+  description: z.string().describe("Brief description of what to learn or do in this step"),
+  estimated_time: z.string().optional().describe("Optional estimated time to complete (e.g., '1 hour', '30 minutes')"),
+  resources: z.array(ResourceSchema).optional().describe("List of free resources for this step"),
 });
 
+// Define the expected structure for a single module
 const ModuleSchema = z.object({
-  title: z.string(),
-  steps: z.array(StepSchema),
+  title: z.string().describe("Title of the learning module"),
+  description: z.string().describe("Brief overview of the module's content"),
+  steps: z.array(StepSchema).describe("Ordered list of steps within the module"),
 });
 
-const CurriculumSchema = z.object({
-  title: z.string(),
-  modules: z.array(ModuleSchema),
+// Define the overall curriculum structure that the API will return
+const CurriculumResponseSchema = z.object({
+  skill: z.string().describe("The skill the curriculum is for"),
+  experienceLevel: z.string().describe("The target experience level used for generation"),
+  curriculum: z.object({
+    title: z.string().describe("Overall title for the generated curriculum"),
+    description: z.string().describe("Brief overview of the entire curriculum"),
+    modules: z.array(ModuleSchema).describe("Ordered list of learning modules"),
+  }),
 });
 
-const GeminiResponseSchema = z.object({
-  curriculum: CurriculumSchema,
+// Define the request body schema expected by this API route
+const RequestBodySchema = z.object({
+  skill: z.string().min(1, { message: 'Skill name is required' }),
+  experienceLevel: z.enum(['beginner', 'intermediate', 'advanced', 'custom']),
+  quizResults: z.string().optional().describe("Stringified results or summary from the custom assessment quiz, used if experienceLevel is 'custom'"),
 });
 
-// Initialize Gemini Client
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+// Type alias for the inferred type of the response schema
+export type CurriculumResponseType = z.infer<typeof CurriculumResponseSchema>;
+
+// --- Gemini API Initialization ---
+const API_KEY = process.env.GEMINI_API_KEY;
+
+const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null;
+const model = genAI ? genAI.getGenerativeModel({
+  model: "gemini-1.5-flash", // Use a stable, available model
+}) : null;
 
 const generationConfig = {
-    responseMimeType: "application/json",
+  temperature: 0.7,
+  topK: 1,
+  topP: 1,
+  maxOutputTokens: 8192,
+  responseMimeType: "application/json", // Request JSON output directly
 };
 
+// Safety settings to block harmful content
 const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
@@ -56,144 +74,24 @@ const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
 ];
 
-// --- Database Saving Logic --- 
-// Extracted into a separate function for clarity
-async function saveGeneratedCurriculum(
-  supabase: SupabaseClient<Database>, // Use the base SupabaseClient type
-  userId: string,
-  skillName: string,
-  experienceLevel: string,
-  quizResults: z.infer<typeof QuizResultSchema> | null,
-  curriculumData: z.infer<typeof GeminiResponseSchema>['curriculum']
-): Promise<number> { // Returns the new curriculumId
-  
-  console.log("Starting database save process...");
-
-  // 1. Upsert Skill
-  const { data: skillData, error: skillError } = await supabase
-    .from('skills')
-    .upsert({ name: skillName }, { onConflict: 'name', ignoreDuplicates: false })
-    .select('id')
-    .single();
-
-  if (skillError || !skillData) {
-    console.error("Skill Upsert Error during save:", skillError);
-    throw new Error("Failed to find or create skill during save.");
-  }
-  const skillId = skillData.id;
-  console.log(`Saved skill_id: ${skillId}`);
-
-  // 2. Insert Base Curriculum Record
-  const { data: curriculumBaseData, error: curriculumError } = await supabase
-    .from('curricula')
-    .insert({
-      user_id: userId,
-      skill_id: skillId,
-      experience_level: experienceLevel,
-      // Add quiz assessment data if available (assuming a 'quiz_assessment' JSONB column)
-      // quiz_assessment: experienceLevel === 'custom' ? quizResults : null,
-      title: curriculumData.title // Save the generated title
-    })
-    .select('id')
-    .single();
-
-  if (curriculumError || !curriculumBaseData) {
-    console.error("Curriculum Insert Error during save:", curriculumError);
-    throw new Error("Failed to save curriculum base record.");
-  }
-  const curriculumId = curriculumBaseData.id;
-  console.log(`Saved curriculum_id: ${curriculumId}`);
-
-  // 3. Prepare and Insert Modules and Steps
-  const modulesToInsert = curriculumData.modules.map((module, moduleIndex) => ({
-    curriculum_id: curriculumId,
-    title: module.title,
-    module_order: moduleIndex, // Add order column
-  }));
-
-  const { data: insertedModules, error: moduleError } = await supabase
-    .from('modules')
-    .insert(modulesToInsert)
-    .select('id, title'); // Select ID and title to map steps correctly
-
-  if (moduleError || !insertedModules) {
-    console.error("Module Insert Error:", moduleError);
-    // TODO: Consider cleanup? Delete base curriculum record?
-    throw new Error("Failed to save curriculum modules.");
-  }
-  console.log(`Saved ${insertedModules.length} modules.`);
-
-  // Create a map for easy lookup of module ID by title
-  const moduleIdMap = new Map(insertedModules.map(m => [m.title, m.id]));
-
-  const stepsToInsert = curriculumData.modules.flatMap((module, moduleIndex) => {
-    const moduleId = moduleIdMap.get(module.title);
-    if (!moduleId) {
-      console.warn(`Could not find saved module ID for module title: ${module.title}. Skipping its steps.`);
-      return []; // Skip steps if module ID wasn't found (shouldn't happen ideally)
-    }
-    return module.steps.map((step, stepIndex) => ({
-      module_id: moduleId,
-      title: step.title,
-      resource_url: step.resource_url,
-      step_order: stepIndex, // Add order column
-    }));
-  });
-
-  if (stepsToInsert.length > 0) {
-    const { error: stepError } = await supabase
-      .from('steps')
-      .insert(stepsToInsert);
-
-    if (stepError) {
-      console.error("Step Insert Error:", stepError);
-       // TODO: Consider cleanup? Delete modules and base record?
-      throw new Error("Failed to save curriculum steps.");
-    }
-    console.log(`Saved ${stepsToInsert.length} steps.`);
-  } else {
-     console.log("No steps to insert.");
-  }
-
-  console.log("Database save process completed successfully.");
-  return curriculumId; // Return the ID of the main curriculum record
-}
-// --- End Database Saving Logic ---
-
+// --- API Route Handler ---
 export async function POST(req: NextRequest) {
-  if (!process.env.NEXT_PUBLIC_GEMINI_API_KEY) {
-     return NextResponse.json({ error: 'API key not configured' }, { status: 500 });
+  // Check if Gemini client failed to initialize (missing API key)
+  if (!genAI || !model) {
+    console.error("Error: Gemini API key not configured or client initialization failed.");
+    return NextResponse.json({ error: 'Server configuration error: Missing API Key' }, { status: 500 });
   }
-
-  // Create Supabase client specific to this route handler using the simpler read-only pattern
-  const supabaseRouteHandler = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name: string) {
-          return req.cookies.get(name)?.value
-        },
-        // No set/remove needed here for this pattern, assume middleware handles refresh
-      },
-    }
-  )
 
   try {
-     // --- 1. Authentication --- 
-     // getSession might still attempt internal cookie operations if refresh needed
-     const { data: { session }, error: sessionError } = await supabaseRouteHandler.auth.getSession();
-     if (sessionError || !session?.user) {
-       console.error("Auth Error:", sessionError);
-       return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-     }
-     const userId = session.user.id;
-     console.log("Authenticated User ID:", userId);
-     // -------------------------
+    // --- 1. Input Validation ---
+    let requestData;
+    try {
+        requestData = await req.json();
+    } catch (e) {
+        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
 
-    // --- 2. Input Validation --- 
-    const body = await req.json();
-    const validation = RequestBodySchema.safeParse(body);
+    const validation = RequestBodySchema.safeParse(requestData);
 
     if (!validation.success) {
       return NextResponse.json(
@@ -201,74 +99,157 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { skillName, experienceLevel, quizResults } = validation.data;
-    // --------------------------
 
-    // --- 3. Prompt Engineering --- 
-    let context = ``;
-    if (experienceLevel === 'custom' && quizResults) {
-      context = `The user described their experience as 'custom'. Based on a quiz, their assessed level is **${quizResults.level}**. Rationale (if any): ${quizResults.rationale || 'N/A'}.`; // Removed quiz answers from prompt for brevity/focus
+    const { skill, experienceLevel, quizResults } = validation.data;
+
+    // --- 2. Construct the Prompt ---
+    let experienceContext = `The target experience level is ${experienceLevel}.`;
+    if (experienceLevel === 'custom') {
+      if (quizResults) {
+        experienceContext = `The user's experience level was assessed via a quiz. Here's a summary of their results or assessed level: ${quizResults}. Tailor the curriculum accordingly.`;
     } else {
-      context = `The user described their experience level as **${experienceLevel}**.`;
+        experienceContext = `The target experience level is 'custom', but no specific quiz results were provided. Assume a level slightly above beginner or use general knowledge to create a foundational but adaptable curriculum.`;
+      }
     }
 
-    // IMPORTANT: Explicitly ask for JSON format in the prompt
-    const prompt = `Generate a structured learning curriculum for the skill \"${skillName}\". 
-${context}
+    // Dynamically create the schema description string for the prompt
+    // NOTE: Zod's .openapi() method is not standard. We manually describe the expected structure.
+    // For simplicity, we'll use a predefined string description, but ideally, this could be
+    // generated or kept in sync with the Zod schema more robustly.
+    const schemaDescription = `{
+      "skill": "string (The skill the curriculum is for)",
+      "experienceLevel": "string (The target experience level)",
+      "curriculum": {
+        "title": "string (Overall title for the curriculum)",
+        "description": "string (Brief overview of the curriculum)",
+        "modules": [
+          {
+            "title": "string (Title of the module)",
+            "description": "string (Overview of the module)",
+            "steps": [
+              {
+                "title": "string (Title of the step)",
+                "description": "string (Description of the step)",
+                "estimated_time": "string (Optional, e.g., '1 hour')",
+                "resources": [
+                  {
+                    "title": "string (Title of the resource)",
+                    "url": "string (Valid URL to the free resource)"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }`;
 
-The curriculum should break the skill down into logical modules, and each module into actionable steps. Each step must include a link (resource_url) to a high-quality, free online resource (article, tutorial, documentation, video, etc.).
+    const prompt = `
+Generate a detailed, step-by-step learning curriculum for the skill: "${skill}".
+${experienceContext}
 
-Return ONLY the raw JSON object (no markdown formatting like \`\`\`json) matching this exact structure:
-{\n  \"curriculum\": {\n    \"title\": \"[Generated Curriculum Title]\",\n    \"modules\": [\n      {\n        \"title\": \"[Module 1 Title]\",\n        \"steps\": [\n          {\n            \"title\": \"[Step 1.1 Title]\",\n            \"resource_url\": \"[URL to free resource]\"\n          },\n          ...\n        ]\n      },\n      ...\n    ]\n  }\n}\n\nEnsure all resource_url fields contain valid URLs. Focus on free, high-quality resources. Output only the JSON object.`;
+The curriculum MUST:
+1. Focus EXCLUSIVELY on high-quality, **free** online resources (articles, tutorials, official documentation, videos). Do NOT include paid courses, books requiring purchase, or subscription-locked content.
+2. Be structured into logical modules, each containing numbered steps.
+3. Each step MUST have a clear title and a brief description. Optionally include an estimated_time.
+4. If a step includes resources, each resource MUST have a title and a valid, direct URL to the free content. Ensure URLs are functional.
+5. Provide a suitable overall title and brief description for the curriculum.
+6. Include the requested skill and experienceLevel in the final JSON output.
 
-    console.log(`Generating curriculum for Skill: ${skillName}, User: ${userId}`);
+Return the response ONLY as a single, raw JSON object matching this exact structure:
+\`\`\`json
+${schemaDescription}
+\`\`\`
 
-    const model = genAI.getGenerativeModel({ model: process.env.NEXT_PUBLIC_GEMINI_MODEL || "gemini-1.5-flash-latest" });
-    
+IMPORTANT: Ensure the output is ONLY the JSON object, without any introductory text, comments, markdown formatting (like \`\`\`json markers outside the object itself), or explanations. The entire response should be parsable as JSON.
+    `;
+
+    // --- 3. Call Gemini API ---
+    console.log(`Generating curriculum for skill: "${skill}", level: ${experienceLevel}`);
     const result = await model.generateContent({ 
-        contents: [{ role: "user", parts: [{text: prompt}] }], 
-        generationConfig: generationConfig,
-        safetySettings: safetySettings,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig,
+      safetySettings,
     });
-    const response = result.response;
-    const responseText = response.text();
 
-    // Since we requested JSON, parse directly
-    const parsedGeminiJson = JSON.parse(responseText);
-    console.log("Parsed Gemini JSON Response:", parsedGeminiJson); 
-
-    // --- 5. Parse & Validate Gemini Response --- 
-    // Validate the parsed JSON structure against our Zod schema
-    const validatedResponse = GeminiResponseSchema.safeParse(parsedGeminiJson);
-
-    if (!validatedResponse.success) {
-      console.error("Gemini Response Validation Error:", validatedResponse.error.format());
-      throw new Error('AI service response did not match expected structure.');
+    // --- 4. Process Response ---
+    if (!result.response) {
+      console.error("Gemini API call failed: No response object.", result);
+      throw new Error('AI service failed to generate a response.');
     }
-    const curriculumData = validatedResponse.data.curriculum;
-    // -----------------------------------------
 
-    // --- 6. Save to Database --- 
-    const newCurriculumId = await saveGeneratedCurriculum(
-      supabaseRouteHandler,
-      userId,
-      skillName,
-      experienceLevel,
-      quizResults,
-      curriculumData
-    );
-    // ---------------------------
+    const candidate = result.response.candidates?.[0];
+    const responseText = candidate?.content?.parts?.[0]?.text;
+    const blockReason = result.response.promptFeedback?.blockReason;
+
+    if (!responseText) {
+      console.error("Gemini API call failed: No text part in the response.", { candidate, feedback: result.response.promptFeedback });
+      if (blockReason) {
+        console.error(`Content generation blocked by safety settings. Reason: ${blockReason}`);
+        // Return a user-friendly error indicating content moderation
+        return NextResponse.json(
+            { error: 'Content generation blocked', message: `The request was blocked due to safety settings: ${blockReason}` },
+            { status: 400 }
+        );
+      }
+      throw new Error('AI service returned an empty or incomplete response.');
+    }
+
+    // console.log("Raw Gemini Response Text:\n", responseText); // Uncomment for debugging
+
+    // --- 5. Parse and Validate JSON ---
+    let parsedCurriculum;
+    try {
+      // Corrected: Changed \n to \n in regex
+      const cleanedText = responseText.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+      parsedCurriculum = JSON.parse(cleanedText);
+    } catch (parseError) {
+      console.error("Failed to parse JSON response from Gemini:", parseError);
+      console.error("Raw Gemini Response that failed parsing:\n", responseText); // Log the raw response
+      throw new Error('AI service returned response in an invalid JSON format.');
+    }
+
+    const validationResult = CurriculumResponseSchema.safeParse(parsedCurriculum);
+
+    if (!validationResult.success) {
+      console.error('Generated curriculum validation error:', validationResult.error.format());
+      console.error("Data that failed validation:", parsedCurriculum); // Log the invalid data
+      // Optionally: Log the prompt that led to this invalid data
+      // console.error("Prompt used:", prompt);
+      throw new Error('AI service response did not match the expected curriculum structure.');
+    }
+
+    // --- 6. TODO: Save to Database ---
+    // At this point, validationResult.data contains the validated curriculum.
+    // You would add logic here to get the user session and save the data to Supabase.
+    // const userId = ... (get user ID from session)
+    // await saveGeneratedCurriculum(supabaseClient, userId, skill, experienceLevel, quizResults, validationResult.data);
 
     // --- 7. Return Success Response --- 
-    return NextResponse.json({ 
-        message: 'Curriculum generated successfully', 
-        curriculumId: newCurriculumId, 
-        curriculum: curriculumData // Optionally return the generated data
-    });
-    // ------------------------------
+    return NextResponse.json(validationResult.data, { status: 200 });
 
   } catch (error: any) {
-    console.error("API Route Error:", error);
-    return NextResponse.json({ error: error.message || 'An unexpected error occurred' }, { status: 500 });
+    console.error("Error generating curriculum:", error);
+    let message = error.message || 'An unexpected error occurred';
+    let status = 500; // Default to Internal Server Error
+
+    // Refine status based on error type
+    if (message.includes('invalid JSON format')) {
+        status = 502; // Bad Gateway (upstream service returned bad data)
+        message = 'Failed to parse curriculum from AI service.';
+    } else if (message.includes('expected curriculum structure')) {
+        status = 502; // Bad Gateway
+        message = 'AI service returned curriculum in an unexpected structure.';
+    } else if (message.includes('AI service returned an empty or incomplete response')) {
+         status = 502; // Bad Gateway
+    } else if (message.includes('AI service failed to generate a response')) {
+        status = 503; // Service Unavailable
+    }
+    // Note: Safety block errors are handled earlier and return 400
+
+    return NextResponse.json(
+      { error: 'Failed to generate curriculum', message: message },
+      { status }
+    );
   }
 } 
