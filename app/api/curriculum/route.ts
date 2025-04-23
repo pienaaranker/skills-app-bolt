@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
+import {
+  GoogleGenerativeAI,
+  HarmCategory,
+  HarmBlockThreshold,
+} from '@google/generative-ai';
 // Use Server Auth Helpers for route handlers
 import { createServerClient } from '@supabase/ssr' // Removed CookieOptions as we won't use set/remove here
 // Removed cookies import as we use request.cookies
@@ -22,11 +26,20 @@ const StepSchema = z.object({
   resources: z.array(ResourceSchema).optional().describe("List of free resources for this step"),
 });
 
+// *** NEW: Define the expected structure for a module assignment ***
+const AssignmentSchema = z.object({
+  title: z.string().describe("Concise title for the assignment"),
+  description: z.string().describe("Brief description of the assignment task"),
+  estimated_time: z.string().optional().describe("Optional estimated time to complete the assignment"),
+});
+
 // Define the expected structure for a single module
 const ModuleSchema = z.object({
   title: z.string().describe("Title of the learning module"),
   description: z.string().describe("Brief overview of the module's content"),
   steps: z.array(StepSchema).describe("Ordered list of steps within the module"),
+  // *** ADDED: Optional assignment field for each module ***
+  assignment: AssignmentSchema.optional().describe("Practical assignment to reinforce module learning"),
 });
 
 // Define the overall curriculum structure that the API will return
@@ -36,7 +49,7 @@ const CurriculumResponseSchema = z.object({
   curriculum: z.object({
     title: z.string().describe("Overall title for the generated curriculum"),
     description: z.string().describe("Brief overview of the entire curriculum"),
-    modules: z.array(ModuleSchema).describe("Ordered list of learning modules"),
+    modules: z.array(ModuleSchema).describe("Ordered list of learning modules"), // Now includes assignments within modules
   }),
 });
 
@@ -52,10 +65,20 @@ export type CurriculumResponseType = z.infer<typeof CurriculumResponseSchema>;
 
 // --- Gemini API Initialization ---
 const API_KEY = process.env.GEMINI_API_KEY;
+const MODEL_NAME = process.env.NEXT_PUBLIC_GEMINI_MODEL;
+
+// Check for required environment variables
+if (!API_KEY) {
+  console.error("CRITICAL ERROR: GEMINI_API_KEY environment variable is not set.");
+}
+if (!MODEL_NAME) {
+  console.error("CRITICAL ERROR: NEXT_PUBLIC_GEMINI_MODEL environment variable is not set.");
+}
 
 const genAI = API_KEY ? new GoogleGenerativeAI(API_KEY) : null;
-const model = genAI ? genAI.getGenerativeModel({
-  model: "gemini-1.5-flash", // Use a stable, available model
+const model = genAI && MODEL_NAME ? genAI.getGenerativeModel({
+  model: MODEL_NAME, // Use the validated variable
+  tools: [{ googleSearch: {} } as any] // Cast to any
 }) : null;
 
 const generationConfig = {
@@ -63,7 +86,7 @@ const generationConfig = {
   topK: 1,
   topP: 1,
   maxOutputTokens: 8192,
-  responseMimeType: "application/json", // Request JSON output directly
+  // REMOVED responseMimeType: "application/json", as it conflicts with tool usage
 };
 
 // Safety settings to block harmful content
@@ -76,33 +99,20 @@ const safetySettings = [
 
 // --- API Route Handler ---
 export async function POST(req: NextRequest) {
-  // Check if Gemini client failed to initialize (missing API key)
   if (!genAI || !model) {
-    console.error("Error: Gemini API key not configured or client initialization failed.");
+    console.error("Error: Gemini API key/client not configured.");
     return NextResponse.json({ error: 'Server configuration error: Missing API Key' }, { status: 500 });
   }
 
   try {
     // --- 1. Input Validation ---
     let requestData;
-    try {
-        requestData = await req.json();
-    } catch (e) {
-        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-    }
-
+    try { requestData = await req.json(); } catch (e) { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }); }
     const validation = RequestBodySchema.safeParse(requestData);
-
-    if (!validation.success) {
-      return NextResponse.json(
-        { error: 'Invalid request body', details: validation.error.format() },
-        { status: 400 }
-      );
-    }
-
+    if (!validation.success) { return NextResponse.json({ error: 'Invalid request body', details: validation.error.format() }, { status: 400 }); }
     const { skill, experienceLevel, quizResults } = validation.data;
 
-    // --- 2. Construct the Prompt ---
+    // --- 2. Construct Prompt --- 
     let experienceContext = `The target experience level is ${experienceLevel}.`;
     if (experienceLevel === 'custom') {
       if (quizResults) {
@@ -111,145 +121,104 @@ export async function POST(req: NextRequest) {
         experienceContext = `The target experience level is 'custom', but no specific quiz results were provided. Assume a level slightly above beginner or use general knowledge to create a foundational but adaptable curriculum.`;
       }
     }
-
-    // Dynamically create the schema description string for the prompt
-    // NOTE: Zod's .openapi() method is not standard. We manually describe the expected structure.
-    // For simplicity, we'll use a predefined string description, but ideally, this could be
-    // generated or kept in sync with the Zod schema more robustly.
+    // *** UPDATED: Schema description to include assignments ***
     const schemaDescription = `{
-      "skill": "string (The skill the curriculum is for)",
-      "experienceLevel": "string (The target experience level)",
-      "curriculum": {
-        "title": "string (Overall title for the curriculum)",
-        "description": "string (Brief overview of the curriculum)",
-        "modules": [
-          {
-            "title": "string (Title of the module)",
-            "description": "string (Overview of the module)",
-            "steps": [
-              {
-                "title": "string (Title of the step)",
-                "description": "string (Description of the step)",
-                "estimated_time": "string (Optional, e.g., '1 hour')",
-                "resources": [
-                  {
-                    "title": "string (Title of the resource)",
-                    "url": "string (Valid URL to the free resource)"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
+      \"skill\": \"string\", \"experienceLevel\": \"string\",
+      \"curriculum\": { \"title\": \"string\", \"description\": \"string\", 
+        \"modules\": [ { \"title\": \"string\", \"description\": \"string\", 
+          \"steps\": [ { \"title\": \"string\", \"description\": \"string\", \"estimated_time\": \"string?", 
+            \"resources\": [ { \"title\": \"string\", \"url\": \"string (valid URL)\" } ]? 
+          } ],
+          \"assignment\": { \"title\": \"string\", \"description\": \"string\", \"estimated_time\": \"string?" }? // Added assignment structure
+        } ] 
       }
     }`;
-
+    
+    // ** UPDATED Prompt: Reordered and reinforced assignment instruction **
     const prompt = `
-Generate a detailed, step-by-step learning curriculum for the skill: "${skill}".
+Act as an expert curriculum designer for the skill: \"${skill}\".
 ${experienceContext}
 
-The curriculum MUST:
-1. Focus EXCLUSIVELY on high-quality, **free** online resources (articles, tutorials, official documentation, videos). Do NOT include paid courses, books requiring purchase, or subscription-locked content.
-2. Be structured into logical modules, each containing numbered steps.
-3. Each step MUST have a clear title and a brief description. Optionally include an estimated_time.
-4. If a step includes resources, each resource MUST have a title and a valid, direct URL to the free content. Ensure URLs are functional.
-5. Provide a suitable overall title and brief description for the curriculum.
-6. Include the requested skill and experienceLevel in the final JSON output.
+Generate a detailed, step-by-step learning curriculum.
 
-Return the response ONLY as a single, raw JSON object matching this exact structure:
+The curriculum MUST:
+1. **For EACH module, include a practical assignment.** The assignment should have a title, a description of the task, and optionally an estimated completion time. The assignment should be designed to help the user actively apply or reinforce the knowledge/skills covered in that specific module.
+2. Be structured into logical modules and steps with titles and descriptions.
+3. Include links to relevant, currently accessible, and genuinely free online learning resources (articles, documentation, tutorials) where appropriate for steps. Ensure all provided URLs are valid and lead to the actual free resource. Leverage search capabilities to verify this. Do not invent URLs. Prioritize official documentation and reputable free learning platforms. If a suitable free resource cannot be found or verified for a step, omit the resource for that step.
+4. Return ONLY the raw JSON object conforming to the structure below. Do NOT include any introductory text, explanations, apologies, or markdown code fences (like \`\`\`json) surrounding the JSON output.
+
+The required JSON structure includes modules, steps, resources, and crucially, an 'assignment' object within each module:
 \`\`\`json
 ${schemaDescription}
 \`\`\`
 
-IMPORTANT: Ensure the output is ONLY the JSON object, without any introductory text, comments, markdown formatting (like \`\`\`json markers outside the object itself), or explanations. The entire response should be parsable as JSON.
+Your entire response must be JUST the JSON object itself.
     `;
 
-    // --- 3. Call Gemini API ---
-    console.log(`Generating curriculum for skill: "${skill}", level: ${experienceLevel}`);
+    // --- 3. Single Gemini API Call --- 
+    console.log(`[API /curriculum] Generating curriculum for skill: "${skill}", level: ${experienceLevel} (Using built-in search)`);
+    
+    // *** Simplified to a single generateContent call ***
     const result = await model.generateContent({ 
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig,
       safetySettings,
+      // tools are defined at model level now
     });
 
-    // --- 4. Process Response ---
-    if (!result.response) {
-      console.error("Gemini API call failed: No response object.", result);
-      throw new Error('AI service failed to generate a response.');
-    }
+    const response = result.response;
+    const responseText = response?.text?.();
 
-    const candidate = result.response.candidates?.[0];
-    const responseText = candidate?.content?.parts?.[0]?.text;
-    const blockReason = result.response.promptFeedback?.blockReason;
-
+    // --- 4. Process Response --- 
     if (!responseText) {
-      console.error("Gemini API call failed: No text part in the response.", { candidate, feedback: result.response.promptFeedback });
+      console.error("Gemini API call failed: No text response received.", { response });
+      const blockReason = response?.promptFeedback?.blockReason;
       if (blockReason) {
-        console.error(`Content generation blocked by safety settings. Reason: ${blockReason}`);
-        // Return a user-friendly error indicating content moderation
-        return NextResponse.json(
-            { error: 'Content generation blocked', message: `The request was blocked due to safety settings: ${blockReason}` },
-            { status: 400 }
-        );
+         return NextResponse.json({ error: 'Content generation blocked', message: `Request blocked by safety settings: ${blockReason}` }, { status: 400 });
       }
       throw new Error('AI service returned an empty or incomplete response.');
     }
+    
+    // Check for grounding metadata (optional, for logging/debugging)
+    const groundingMetadata = response?.candidates?.[0]?.groundingMetadata;
+    if (groundingMetadata) {
+        console.log("[API /curriculum] Grounding metadata found (Search likely used).");
+        // console.log("Search Queries:", groundingMetadata.webSearchQueries); // Log queries if needed
+    } else {
+        console.log("[API /curriculum] No grounding metadata found (Search might not have been triggered or successful).");
+    }
 
-    // console.log("Raw Gemini Response Text:\n", responseText); // Uncomment for debugging
+    // console.log("Raw Gemini Response Text:\n", responseText); // Debugging
 
-    // --- 5. Parse and Validate JSON ---
+    // --- 5. Parse and Validate JSON --- 
     let parsedCurriculum;
     try {
-      // Corrected: Changed \n to \n in regex
+      // Attempt to cleanup potential markdown code fences
       const cleanedText = responseText.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
       parsedCurriculum = JSON.parse(cleanedText);
     } catch (parseError) {
       console.error("Failed to parse JSON response from Gemini:", parseError);
-      console.error("Raw Gemini Response that failed parsing:\n", responseText); // Log the raw response
+      console.error("Raw Gemini Response that failed parsing:\n", responseText);
       throw new Error('AI service returned response in an invalid JSON format.');
     }
-
     const validationResult = CurriculumResponseSchema.safeParse(parsedCurriculum);
-
     if (!validationResult.success) {
       console.error('Generated curriculum validation error:', validationResult.error.format());
-      console.error("Data that failed validation:", parsedCurriculum); // Log the invalid data
-      // Optionally: Log the prompt that led to this invalid data
-      // console.error("Prompt used:", prompt);
+      console.error("Data that failed validation:", parsedCurriculum);
       throw new Error('AI service response did not match the expected curriculum structure.');
     }
 
-    // --- 6. TODO: Save to Database ---
-    // At this point, validationResult.data contains the validated curriculum.
-    // You would add logic here to get the user session and save the data to Supabase.
-    // const userId = ... (get user ID from session)
-    // await saveGeneratedCurriculum(supabaseClient, userId, skill, experienceLevel, quizResults, validationResult.data);
-
-    // --- 7. Return Success Response --- 
+    // --- 6. Return Success Response --- 
     return NextResponse.json(validationResult.data, { status: 200 });
 
   } catch (error: any) {
     console.error("Error generating curriculum:", error);
     let message = error.message || 'An unexpected error occurred';
-    let status = 500; // Default to Internal Server Error
-
-    // Refine status based on error type
-    if (message.includes('invalid JSON format')) {
-        status = 502; // Bad Gateway (upstream service returned bad data)
-        message = 'Failed to parse curriculum from AI service.';
-    } else if (message.includes('expected curriculum structure')) {
-        status = 502; // Bad Gateway
-        message = 'AI service returned curriculum in an unexpected structure.';
-    } else if (message.includes('AI service returned an empty or incomplete response')) {
-         status = 502; // Bad Gateway
-    } else if (message.includes('AI service failed to generate a response')) {
-        status = 503; // Service Unavailable
-    }
-    // Note: Safety block errors are handled earlier and return 400
-
-    return NextResponse.json(
-      { error: 'Failed to generate curriculum', message: message },
-      { status }
-    );
+    let status = 500; 
+    if (message.includes('invalid JSON format')) status = 502; 
+    else if (message.includes('expected curriculum structure')) status = 502;
+    else if (message.includes('empty or incomplete response')) status = 502;
+    else if (message.includes('AI service failed')) status = 503;
+    return NextResponse.json({ error: 'Failed to generate curriculum', message }, { status });
   }
 } 
