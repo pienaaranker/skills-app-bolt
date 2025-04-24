@@ -109,7 +109,36 @@ async function saveCurriculumToDb(
   const curriculumId = curriculumBaseData.id;
   console.log(`[Save DB] Saved curriculum_id: ${curriculumId}`);
 
-  // --- REMOVED separate module/step insertion logic --- 
+  // --- 3. Insert Assignments ---
+  const assignments = curriculum.modules
+    .map((module, moduleIndex) => {
+      if (!module.assignment) return null;
+      return {
+        skill_id: skillId,
+        module_index: moduleIndex,
+        step_index: -1, // -1 indicates this is a module-level assignment
+        title: module.assignment.title,
+        description: module.assignment.description,
+        completed: false
+      };
+    })
+    .filter(assignment => assignment !== null);
+
+  if (assignments.length > 0) {
+    console.log("[Save DB] Attempting to insert assignments:", assignments);
+    const { error: assignmentsError } = await supabase
+      .from('assignments')
+      .insert(assignments);
+
+    if (assignmentsError) {
+      console.error("Assignments Insert Failed:", assignmentsError);
+      // Don't throw error here - we'll still return the curriculum ID even if assignments fail
+      // But log it for monitoring
+      console.warn("Failed to save assignments but curriculum was saved successfully");
+    } else {
+      console.log(`[Save DB] Successfully saved ${assignments.length} assignments`);
+    }
+  }
 
   console.log("Database save process completed successfully for curriculum ID:", curriculumId);
   return curriculumId; // Return the ID (UUID string)

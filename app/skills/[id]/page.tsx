@@ -32,40 +32,52 @@ export default function SkillPage() {
       try {
         setLoading(true);
         
-        // In a real implementation, we'd fetch from Supabase
-        // For now, we'll simulate with mock data
-        const mockSkill: Skill = {
-          id: skillId,
-          created_at: new Date().toISOString(),
-          user_id: "user123",
-          skill_name: "JavaScript",
-          experience_level: "intermediate",
-          current_step: 3,
-          total_steps: 10,
-          completed: false
-        };
+        // Fetch skill from Supabase
+        const { data: skillData, error: skillError } = await supabase
+          .from('skills')
+          .select('*')
+          .eq('id', skillId)
+          .single();
+
+        if (skillError) throw skillError;
+        if (!skillData) throw new Error('Skill not found');
         
-        setSkill(mockSkill);
-        
-        // Generate or fetch curriculum
-        const generatedCurriculum = await generateCurriculum({
-          skill: mockSkill.skill_name,
-          experienceLevel: mockSkill.experience_level as any,
-        });
-        
-        // Update completion status based on current_step
-        let stepsCompleted = 0;
-        const updatedModules = generatedCurriculum.modules.map((module) => {
-          const updatedSteps = module.steps.map((step) => {
-            const completed = stepsCompleted < mockSkill.current_step;
-            if (completed) stepsCompleted++;
-            return { ...step, completed };
+        setSkill(skillData);
+
+        // Fetch curriculum from Supabase
+        const { data: curriculumData, error: curriculumError } = await supabase
+          .from('curricula')
+          .select('*')
+          .eq('skill_id', skillId)
+          .single();
+
+        if (curriculumError) throw curriculumError;
+        if (!curriculumData) throw new Error('Curriculum not found');
+
+        // Fetch assignments to mark completed steps
+        const { data: assignmentsData, error: assignmentsError } = await supabase
+          .from('assignments')
+          .select('*')
+          .eq('skill_id', skillId);
+
+        if (assignmentsError) throw assignmentsError;
+
+        // Update completion status based on assignments
+        const completedAssignments = assignmentsData || [];
+        const updatedModules = curriculumData.modules.map((module: any, moduleIndex: number) => {
+          const updatedSteps = module.steps.map((step: any, stepIndex: number) => {
+            const isCompleted = completedAssignments.some(
+              (assignment) => 
+                assignment.module_index === moduleIndex && 
+                (assignment.step_index === stepIndex || (assignment.step_index === -1 && stepIndex === module.steps.length - 1))
+            );
+            return { ...step, completed: isCompleted };
           });
           return { ...module, steps: updatedSteps };
         });
         
         setCurriculum({
-          ...generatedCurriculum,
+          ...curriculumData,
           modules: updatedModules,
         });
       } catch (error: any) {
@@ -83,51 +95,83 @@ export default function SkillPage() {
     fetchSkillAndCurriculum();
   }, [params.id, router, toast]);
 
-  const handleComplete = (moduleIndex: number, stepIndex: number) => {
-    if (!curriculum) return;
+  const handleComplete = async (moduleIndex: number, stepIndex: number) => {
+    if (!curriculum || !skill) return;
     
-    // Update the curriculum state to mark the step as completed
-    const updatedModules = curriculum.modules.map((module, mIndex) => {
-      if (mIndex === moduleIndex) {
-        const updatedSteps = module.steps.map((step, sIndex) => {
-          if (sIndex === stepIndex) {
-            return { ...step, completed: true };
-          }
-          return step;
-        });
-        return { ...module, steps: updatedSteps };
-      }
-      return module;
-    });
-    
-    setCurriculum({
-      ...curriculum,
-      modules: updatedModules,
-    });
-    
-    // Calculate new current_step
-    let totalCompleted = 0;
-    updatedModules.forEach((module) => {
-      module.steps.forEach((step) => {
-        if (step.completed) totalCompleted++;
+    try {
+      // Update the curriculum state to mark the step as completed
+      const updatedModules = curriculum.modules.map((module, mIndex) => {
+        if (mIndex === moduleIndex) {
+          const updatedSteps = module.steps.map((step, sIndex) => {
+            if (sIndex === stepIndex) {
+              return { ...step, completed: true };
+            }
+            return step;
+          });
+          return { ...module, steps: updatedSteps };
+        }
+        return module;
       });
-    });
-    
-    // Update skill progress
-    setSkill((prev) => {
-      if (!prev) return null;
-      return {
-        ...prev,
-        current_step: totalCompleted,
-      };
-    });
-    
-    toast({
-      title: "Progress saved",
-      description: "You've completed this step!",
-    });
-    
-    // In a real implementation, we would update the database
+      
+      setCurriculum({
+        ...curriculum,
+        modules: updatedModules,
+      });
+      
+      // Calculate new current_step
+      let totalCompleted = 0;
+      updatedModules.forEach((module) => {
+        module.steps.forEach((step) => {
+          if (step.completed) totalCompleted++;
+        });
+      });
+      
+      // Update skill progress in database
+      const { error: skillError } = await supabase
+        .from('skills')
+        .update({
+          current_step: totalCompleted,
+          completed: totalCompleted === skill.total_steps
+        })
+        .eq('id', skill.id);
+
+      if (skillError) throw skillError;
+      
+      // Create assignment record
+      const { error: assignmentError } = await supabase
+        .from('assignments')
+        .insert({
+          skill_id: skill.id,
+          module_index: moduleIndex,
+          step_index: stepIndex,
+          title: curriculum.modules[moduleIndex].steps[stepIndex].title,
+          description: curriculum.modules[moduleIndex].steps[stepIndex].description,
+          completed: true
+        });
+
+      if (assignmentError) throw assignmentError;
+      
+      // Update local skill state
+      setSkill((prev: Skill | null) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          current_step: totalCompleted,
+          completed: totalCompleted === prev.total_steps
+        };
+      });
+      
+      toast({
+        title: "Progress saved",
+        description: "You've completed this step!",
+      });
+    } catch (error: any) {
+      toast({
+        title: "Error saving progress",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
   };
 
   const handleRequestAssignment = async (moduleIndex: number, stepIndex: number) => {
@@ -156,13 +200,41 @@ export default function SkillPage() {
     }
   };
 
-  const handleAssignmentSubmit = () => {
-    toast({
-      title: "Assignment submitted",
-      description: "Great job completing the assignment!",
-    });
+  const handleAssignmentSubmit = async () => {
+    if (!skill || !curriculum || !assignment) return;
     
-    // In a real implementation, we would save the assignment to the database
+    try {
+      // Create assignment record
+      const { error: assignmentError } = await supabase
+        .from('assignments')
+        .insert({
+          skill_id: skill.id,
+          module_index: activeModule,
+          step_index: activeStep,
+          title: assignment.title,
+          description: assignment.description,
+          completed: true
+        });
+
+      if (assignmentError) throw assignmentError;
+
+      toast({
+        title: "Assignment submitted",
+        description: "Great job completing the assignment!",
+      });
+
+      // Close the assignment dialog
+      setIsAssignmentOpen(false);
+
+      // Update the curriculum view to show completion
+      handleComplete(activeModule, activeStep);
+    } catch (error: any) {
+      toast({
+        title: "Error submitting assignment",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
   };
 
   if (loading) {

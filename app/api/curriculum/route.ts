@@ -11,6 +11,7 @@ import { createServerClient } from '@supabase/ssr' // Removed CookieOptions as w
 import type { SupabaseClient } from '@supabase/supabase-js'; // Import base client type
 // import type { Database } from '@/lib/database.types'; // Assuming you have generated types
 type Database = any; // Use any as temporary fallback for Database types
+import { curriculumPrompt } from '@/lib/prompts/curriculumPrompt'; // Import the new prompt function
 
 // Define the expected structure for a single resource
 const ResourceSchema = z.object({
@@ -121,39 +122,9 @@ export async function POST(req: NextRequest) {
         experienceContext = `The target experience level is 'custom', but no specific quiz results were provided. Assume a level slightly above beginner or use general knowledge to create a foundational but adaptable curriculum.`;
       }
     }
-    // *** UPDATED: Schema description to include assignments ***
-    const schemaDescription = `{
-      \"skill\": \"string\", \"experienceLevel\": \"string\",
-      \"curriculum\": { \"title\": \"string\", \"description\": \"string\", 
-        \"modules\": [ { \"title\": \"string\", \"description\": \"string\", 
-          \"steps\": [ { \"title\": \"string\", \"description\": \"string\", \"estimated_time\": \"string?", 
-            \"resources\": [ { \"title\": \"string\", \"url\": \"string (valid URL)\" } ]? 
-          } ],
-          \"assignment\": { \"title\": \"string\", \"description\": \"string\", \"estimated_time\": \"string?" }? // Added assignment structure
-        } ] 
-      }
-    }`;
     
     // ** UPDATED Prompt: Reordered and reinforced assignment instruction **
-    const prompt = `
-Act as an expert curriculum designer for the skill: \"${skill}\".
-${experienceContext}
-
-Generate a detailed, step-by-step learning curriculum.
-
-The curriculum MUST:
-1. **For EACH module, include a practical assignment.** The assignment should have a title, a description of the task, and optionally an estimated completion time. The assignment should be designed to help the user actively apply or reinforce the knowledge/skills covered in that specific module.
-2. Be structured into logical modules and steps with titles and descriptions.
-3. Include links to relevant, currently accessible, and genuinely free online learning resources (articles, documentation, tutorials) where appropriate for steps. Ensure all provided URLs are valid and lead to the actual free resource. Leverage search capabilities to verify this. Do not invent URLs. Prioritize official documentation and reputable free learning platforms. If a suitable free resource cannot be found or verified for a step, omit the resource for that step.
-4. Return ONLY the raw JSON object conforming to the structure below. Do NOT include any introductory text, explanations, apologies, or markdown code fences (like \`\`\`json) surrounding the JSON output.
-
-The required JSON structure includes modules, steps, resources, and crucially, an 'assignment' object within each module:
-\`\`\`json
-${schemaDescription}
-\`\`\`
-
-Your entire response must be JUST the JSON object itself.
-    `;
+    const prompt = curriculumPrompt(skill, experienceLevel, quizResults);
 
     // --- 3. Single Gemini API Call --- 
     console.log(`[API /curriculum] Generating curriculum for skill: "${skill}", level: ${experienceLevel} (Using built-in search)`);
@@ -193,14 +164,35 @@ Your entire response must be JUST the JSON object itself.
     // --- 5. Parse and Validate JSON --- 
     let parsedCurriculum;
     try {
-      // Attempt to cleanup potential markdown code fences
-      const cleanedText = responseText.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '');
+      // Enhanced cleanup of the response text
+      const cleanedText = responseText
+        .trim()
+        // Remove any markdown code fences
+        .replace(/^```(?:json)?\n?/, '')
+        .replace(/\n?```$/, '')
+        // Remove any trailing commas before closing braces/brackets
+        .replace(/,(\s*[}\]])/g, '$1')
+        // Handle potential line breaks and formatting
+        .replace(/\n\s*/g, ' ')
+        .trim();
+
       parsedCurriculum = JSON.parse(cleanedText);
+
+      // Log the parsed structure for debugging
+      console.log('Successfully parsed curriculum structure:', {
+        hasSkill: !!parsedCurriculum.skill,
+        hasExperienceLevel: !!parsedCurriculum.experienceLevel,
+        moduleCount: parsedCurriculum.curriculum?.modules?.length,
+        firstModuleHasAssignment: !!parsedCurriculum.curriculum?.modules?.[0]?.assignment
+      });
+
     } catch (parseError) {
       console.error("Failed to parse JSON response from Gemini:", parseError);
       console.error("Raw Gemini Response that failed parsing:\n", responseText);
       throw new Error('AI service returned response in an invalid JSON format.');
     }
+
+    // Validate the structure
     const validationResult = CurriculumResponseSchema.safeParse(parsedCurriculum);
     if (!validationResult.success) {
       console.error('Generated curriculum validation error:', validationResult.error.format());

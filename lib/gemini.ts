@@ -30,6 +30,11 @@ export interface GeneratedCurriculum {
       }>;
       completed: boolean;
     }>;
+    assignment?: {
+      title: string;
+      description: string;
+      estimated_time?: string;
+    };
   }>;
 }
 

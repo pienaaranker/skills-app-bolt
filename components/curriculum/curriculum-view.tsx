@@ -2,7 +2,21 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, BookOpen, CheckCircle2, ExternalLink, ListChecks, DivideIcon as LucideIcon } from "lucide-react";
+import { 
+  ArrowLeft, 
+  BookOpen, 
+  CheckCircle2, 
+  ExternalLink, 
+  ListChecks, 
+  DivideIcon as LucideIcon,
+  Pencil,
+  FileText,
+  Video,
+  Book,
+  GraduationCap,
+  HelpCircle,
+  Timer
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +34,22 @@ interface CurriculumViewProps {
   onComplete: (moduleIndex: number, stepIndex: number) => void;
   onRequestAssignment: (moduleIndex: number, stepIndex: number) => void;
 }
+
+// Add a helper function to get resource type icon
+const getResourceTypeIcon = (type: string) => {
+  switch (type?.toLowerCase()) {
+    case 'article':
+      return <FileText className="h-4 w-4" />;
+    case 'video':
+      return <Video className="h-4 w-4" />;
+    case 'documentation':
+      return <Book className="h-4 w-4" />;
+    case 'tutorial':
+      return <GraduationCap className="h-4 w-4" />;
+    default:
+      return <HelpCircle className="h-4 w-4" />;
+  }
+};
 
 export function CurriculumView({
   skill,
@@ -153,15 +183,18 @@ export function CurriculumView({
                     <div>
                       <h3 className="text-lg font-medium mb-4">Learning Resources</h3>
                       <div className="space-y-3">
-                        {curriculum.modules[activeModule].steps[activeStep].resources.map((resource, i) => (
+                        {curriculum.modules[activeModule].steps[activeStep].resources?.map((resource, i) => (
                           <Card key={i} className="overflow-hidden">
                             <CardContent className="p-4">
                               <div className="flex items-start justify-between gap-4">
-                                <div>
-                                  <h4 className="font-medium">{resource.title}</h4>
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    {resource.type.charAt(0).toUpperCase() + resource.type.slice(1)}
-                                  </p>
+                                <div className="flex items-start gap-3">
+                                  {getResourceTypeIcon(resource.type)}
+                                  <div>
+                                    <h4 className="font-medium">{resource.title}</h4>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      {resource.type?.charAt(0).toUpperCase() + resource.type?.slice(1)}
+                                    </p>
+                                  </div>
                                 </div>
                                 <Button size="sm" variant="outline" asChild>
                                   <a href={resource.url} target="_blank" rel="noopener noreferrer">
@@ -175,6 +208,29 @@ export function CurriculumView({
                         ))}
                       </div>
                     </div>
+
+                    {curriculum.modules[activeModule].assignment && (
+                      <div>
+                        <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
+                          <Pencil className="h-5 w-5" />
+                          Module Assignment
+                        </h3>
+                        <Card className="border-2 border-primary/20">
+                          <CardContent className="p-4">
+                            <div className="space-y-2">
+                              <h4 className="font-medium">{curriculum.modules[activeModule].assignment.title}</h4>
+                              <p className="text-sm">{curriculum.modules[activeModule].assignment.description}</p>
+                              {curriculum.modules[activeModule].assignment.estimated_time && (
+                                <p className="text-xs text-muted-foreground flex items-center gap-1 mt-2">
+                                  <Timer className="h-3 w-3" />
+                                  Estimated time: {curriculum.modules[activeModule].assignment.estimated_time}
+                                </p>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </div>
+                    )}
                     
                     <div className="flex flex-col-reverse sm:flex-row sm:justify-between sm:space-x-2">
                       <Button 
